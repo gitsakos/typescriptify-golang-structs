@@ -45,6 +45,7 @@ type TypeOptions struct {
 
 // StructType stores settings for transforming one Golang struct.
 type StructType struct {
+	CustomName []string
 	Type         reflect.Type
 	FieldOptions map[reflect.Type]TypeOptions
 }
@@ -238,22 +239,25 @@ func (t *TypeScriptify) WithCustomJsonTag(tag string) *TypeScriptify {
 	return t
 }
 
-func (t *TypeScriptify) Add(obj interface{}) *TypeScriptify {
+
+
+func (t *TypeScriptify) Add(obj interface{}, name ...string ) *TypeScriptify {
+
 	switch ty := obj.(type) {
 	case StructType:
 		t.structTypes = append(t.structTypes, ty)
 	case *StructType:
 		t.structTypes = append(t.structTypes, *ty)
 	case reflect.Type:
-		t.AddType(ty)
+		t.AddType(ty, name...)
 	default:
-		t.AddType(reflect.TypeOf(obj))
+		t.AddType(reflect.TypeOf(obj), name...)
 	}
 	return t
 }
 
-func (t *TypeScriptify) AddType(typeOf reflect.Type) *TypeScriptify {
-	t.structTypes = append(t.structTypes, StructType{Type: typeOf})
+func (t *TypeScriptify) AddType(typeOf reflect.Type, customName ...string) *TypeScriptify {
+	t.structTypes = append(t.structTypes, StructType{CustomName: customName, Type: typeOf})
 	return t
 }
 
@@ -372,7 +376,7 @@ func (t *TypeScriptify) Convert(customCode map[string]string) (string, error) {
 	}
 
 	for _, strctTyp := range t.structTypes {
-		typeScriptCode, err := t.convertType(depth, strctTyp.Type, customCode)
+		typeScriptCode, err := t.convertType(depth, strctTyp.Type, customCode, strctTyp.CustomName...)
 		if err != nil {
 			return "", err
 		}
@@ -558,7 +562,14 @@ func (t *TypeScriptify) getJSONFieldName(field reflect.StructField, isPtr bool) 
 	if t.CustomJsonTag != "" {
 		tag = t.CustomJsonTag
 	}
-	jsonTag := field.Tag.Get(tag)
+	var jsonTag string
+	if jsonTag = field.Tag.Get(tag); jsonTag == ""{
+		if jsonTag = field.Tag.Get("param"); jsonTag == "" {
+			if jsonTag = field.Tag.Get("query"); jsonTag == "" {
+				jsonTag = field.Tag.Get("form")
+			}
+		}
+	}
 	if len(jsonTag) > 0 {
 		jsonTagParts := strings.Split(jsonTag, ",")
 		if len(jsonTagParts) > 0 {
@@ -588,15 +599,34 @@ func (t *TypeScriptify) getJSONFieldName(field reflect.StructField, isPtr bool) 
 	return jsonFieldName
 }
 
-func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode map[string]string) (string, error) {
-	if _, found := t.alreadyConverted[typeOf]; found { // Already converted
+func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode map[string]string, customTypeName ...string) (string, error) {
+
+	//if custom type name specified, allow duplicate types to be converted
+	if _, found := t.alreadyConverted[typeOf]; found && len(customTypeName) == 0{ // Already converted
 		return "", nil
 	}
 	t.logf(depth, "Converting type %s", typeOf.String())
 
 	t.alreadyConverted[typeOf] = true
 
-	entityName := t.Prefix + typeOf.Name() + t.Suffix
+	// grab custom type name if it exits
+	var typeName string
+	if len(customTypeName) > 0{
+		typeName = customTypeName[0]
+	}
+
+	// if no custom type name, pull standard name
+	if typeName == ""{
+		typeName = typeOf.Name()
+	}
+
+	// if we still don't have a typename, abort this type.
+	if typeName == ""{
+		return "", nil
+
+	}
+
+	entityName := t.Prefix + typeName + t.Suffix
 	result := ""
 	if t.CreateInterface {
 		result += fmt.Sprintf("interface %s {\n", entityName)
