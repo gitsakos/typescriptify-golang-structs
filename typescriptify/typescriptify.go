@@ -99,6 +99,10 @@ type TypeScriptify struct {
 	enums       map[reflect.Type][]enumElement
 	kinds       map[reflect.Kind]string
 
+	orderedElementNames []string
+	elementsMap map[string]string
+	elementsDependenciesMap map[string][]string
+
 	fieldTypeOptions map[reflect.Type]TypeOptions
 
 	// throwaway, used when converting
@@ -342,7 +346,17 @@ func (t *TypeScriptify) AddEnumValues(typeOf reflect.Type, values interface{}) *
 	return t
 }
 
-func (t *TypeScriptify) Convert(customCode map[string]string) (string, error) {
+func (t *TypeScriptify)AddConvertedElement(name, element string, dependencies []string) error{
+	if _, found := t.elementsMap[name]; found{
+		return fmt.Errorf("Duplicate enum type: %s", name)
+	}
+	t.elementsMap[name] = "\n" + strings.Trim(element, " "+t.Indent+"\r\n")
+	t.orderedElementNames = append(t.orderedElementNames, name)
+	t.elementsDependenciesMap[name] = dependencies
+	return nil
+}
+
+func (t *TypeScriptify) Convert(customCode map[string]string) ( error) {
 	if t.CreateFromMethod {
 		fmt.Fprintln(os.Stderr, "FromMethod METHOD IS DEPRECATED AND WILL BE REMOVED!!!!!!")
 	}
@@ -350,48 +364,51 @@ func (t *TypeScriptify) Convert(customCode map[string]string) (string, error) {
 	t.alreadyConverted = make(map[reflect.Type]bool)
 	depth := 0
 
-	result := ""
+	t.elementsMap = map[string]string{}
+	t.orderedElementNames = []string{}
+	t.elementsDependenciesMap = map[string][]string{}
+
 	if len(t.customImports) > 0 {
 		// Put the custom imports, i.e.: `import Decimal from 'decimal.js'`
 		for _, cimport := range t.customImports {
-			result += cimport + "\n"
+			t.AddConvertedElement("customImports",  cimport + "\n", nil)
+
 		}
 	}
 
 	if len(t.customCodeBefore) > 0 {
-		result += "\n"
 		for _, code := range t.customCodeBefore {
-			result += "\n" + code + "\n"
+				t.AddConvertedElement("customCodeBefore", "\n\n" + code + "\n\n", nil)
+
 		}
-		result += "\n"
 	}
 
 	for _, enumTyp := range t.enumTypes {
 		elements := t.enums[enumTyp.Type]
-		typeScriptCode, err := t.convertEnum(depth, enumTyp.Type, elements)
+		name, typeScriptCode, err := t.convertEnum(depth, enumTyp.Type, elements)
 		if err != nil {
-			return "", err
+			return err
 		}
-		result += "\n" + strings.Trim(typeScriptCode, " "+t.Indent+"\r\n")
+		if typeScriptCode != ""{
+			t.AddConvertedElement(name, typeScriptCode, nil)
+		}
 	}
 
 	for _, strctTyp := range t.structTypes {
-		typeScriptCode, err := t.convertType(depth, strctTyp.Type, customCode, strctTyp.CustomName...)
+		_, err := t.convertType(depth, strctTyp.Type, customCode, strctTyp.CustomName...)
 		if err != nil {
-			return "", err
+			return err
 		}
-		result += "\n" + strings.Trim(typeScriptCode, " "+t.Indent+"\r\n")
 	}
 
 	if len(t.customCodeAfter) > 0 {
-		result += "\n"
 		for _, code := range t.customCodeAfter {
-			result += "\n" + code + "\n"
+			t.AddConvertedElement("customCodeAfter", "\n\n" + code + "\n\n", nil)
+
 		}
-		result += "\n"
 	}
 
-	return result, nil
+	return nil
 }
 
 func loadCustomCode(fileName string) (map[string]string, error) {
@@ -473,10 +490,17 @@ func (t TypeScriptify) ConvertToFile(fileName string) error {
 	}
 	defer f.Close()
 
-	converted, err := t.Convert(customCode)
+	err = t.Convert(customCode)
 	if err != nil {
 		return err
 	}
+
+	var converted string
+	for _, name := range t.orderedElementNames{
+		converted = converted + t.elementsMap[name] //+ "\n"
+	}
+
+
 
 	if _, err := f.WriteString("/* Do not change, this code is generated from Golang structs */\n\n"); err != nil {
 		return err
@@ -491,14 +515,59 @@ func (t TypeScriptify) ConvertToFile(fileName string) error {
 	return nil
 }
 
+func (t TypeScriptify) ConvertStructsToFiles(pathName string) error {
+	if len(t.BackupDir) > 0 {
+		return fmt.Errorf("BackDir not supported when converting to individual files")
+	}
+
+
+
+	err := t.Convert(nil)
+	if err != nil {
+		return err
+	}
+
+	for _, name := range t.orderedElementNames{
+		converted := t.elementsMap[name] //+ "\n"
+
+		f, err := os.Create(fmt.Sprintf("%s/%s.ts", pathName, name))
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if _, err := f.WriteString("/* Do not change, this code is generated from Golang structs */\n\n"); err != nil {
+			return err
+		}
+
+		if dependencies, found := t.elementsDependenciesMap[name]; found{
+			for _, dependency := range dependencies{
+				f.WriteString(fmt.Sprintf("import { %s } from \"./%s\"\n", dependency, dependency))
+			}
+
+			f.WriteString("\n")
+		}
+
+		if _, err := f.WriteString(converted); err != nil {
+			return err
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+
+}
+
 type TSNamer interface {
 	TSName() string
 }
 
-func (t *TypeScriptify) convertEnum(depth int, typeOf reflect.Type, elements []enumElement) (string, error) {
+func (t *TypeScriptify) convertEnum(depth int, typeOf reflect.Type, elements []enumElement) (string, string, error) {
 	t.logf(depth, "Converting enum %s", typeOf.String())
 	if _, found := t.alreadyConverted[typeOf]; found { // Already converted
-		return "", nil
+		return "", "", nil
 	}
 	t.alreadyConverted[typeOf] = true
 
@@ -515,7 +584,7 @@ func (t *TypeScriptify) convertEnum(depth int, typeOf reflect.Type, elements []e
 		result = "export " + result
 	}
 
-	return result, nil
+	return entityName, result, nil
 }
 
 func (t *TypeScriptify) getFieldOptions(structType reflect.Type, field reflect.StructField) TypeOptions {
@@ -602,13 +671,16 @@ func (t *TypeScriptify) getJSONFieldName(field reflect.StructField, isPtr bool) 
 func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode map[string]string, customTypeName ...string) (string, error) {
 
 	//if custom type name specified, allow duplicate types to be converted
-	if _, found := t.alreadyConverted[typeOf]; found && len(customTypeName) == 0{ // Already converted
-		return "", nil
-	}
+	/*if _, found := t.alreadyConverted[typeOf]; found && len(customTypeName) == 0{ // Already converted
+		return nil
+	}*/
+
+
 	t.logf(depth, "Converting type %s", typeOf.String())
 
 	t.alreadyConverted[typeOf] = true
 
+	var dependencies []string
 	// grab custom type name if it exits
 	var typeName string
 	if len(customTypeName) > 0{
@@ -622,8 +694,7 @@ func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode m
 
 	// if we still don't have a typename, abort this type.
 	if typeName == ""{
-		return "", nil
-
+		return  "", nil
 	}
 
 	entityName := t.Prefix + typeName + t.Suffix
@@ -670,13 +741,12 @@ func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode m
 			err = builder.AddSimpleField(jsonFieldName, field, fldOpts)
 		} else if field.Type.Kind() == reflect.Struct { // Struct:
 			t.logf(depth, "- struct %s.%s (%s)", typeOf.Name(), field.Name, field.Type.String())
-			typeScriptChunk, err := t.convertType(depth+1, field.Type, customCode)
+			dependency, err := t.convertType(depth+1, field.Type, customCode)
 			if err != nil {
 				return "", err
 			}
-			if typeScriptChunk != "" {
-				result = typeScriptChunk + "\n" + result
-			}
+			dependencies = append(dependencies, dependency)
+
 			builder.AddStructField(jsonFieldName, field)
 		} else if field.Type.Kind() == reflect.Map {
 			t.logf(depth, "- map field %s.%s", typeOf.Name(), field.Name)
@@ -689,13 +759,11 @@ func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode m
 				keyTypeToConvert = field.Type.Key().Elem()
 			}
 			if keyTypeToConvert != nil {
-				typeScriptChunk, err := t.convertType(depth+1, keyTypeToConvert, customCode)
+				dependency, err := t.convertType(depth+1, keyTypeToConvert, customCode)
 				if err != nil {
 					return "", err
 				}
-				if typeScriptChunk != "" {
-					result = typeScriptChunk + "\n" + result
-				}
+				dependencies = append(dependencies, dependency)
 			}
 			// Also convert map value types if needed
 			var valueTypeToConvert reflect.Type
@@ -706,13 +774,12 @@ func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode m
 				valueTypeToConvert = field.Type.Elem().Elem()
 			}
 			if valueTypeToConvert != nil {
-				typeScriptChunk, err := t.convertType(depth+1, valueTypeToConvert, customCode)
+				dependency, err := t.convertType(depth+1, valueTypeToConvert, customCode)
 				if err != nil {
 					return "", err
 				}
-				if typeScriptChunk != "" {
-					result = typeScriptChunk + "\n" + result
-				}
+				dependencies = append(dependencies, dependency)
+
 			}
 
 			builder.AddMapField(jsonFieldName, field)
@@ -729,13 +796,11 @@ func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode m
 
 			if field.Type.Elem().Kind() == reflect.Struct { // Slice of structs:
 				t.logf(depth, "- struct slice %s.%s (%s)", typeOf.Name(), field.Name, field.Type.String())
-				typeScriptChunk, err := t.convertType(depth+1, field.Type.Elem(), customCode)
+				dependency, err := t.convertType(depth+1, field.Type.Elem(), customCode)
 				if err != nil {
 					return "", err
 				}
-				if typeScriptChunk != "" {
-					result = typeScriptChunk + "\n" + result
-				}
+				dependencies = append(dependencies, dependency)
 				builder.AddArrayOfStructsField(jsonFieldName, field, arrayDepth)
 			} else { // Slice of simple fields:
 				t.logf(depth, "- slice field %s.%s", typeOf.Name(), field.Name)
@@ -783,7 +848,9 @@ func (t *TypeScriptify) convertType(depth int, typeOf reflect.Type, customCode m
 
 	result += "}"
 
-	return result, nil
+	t.AddConvertedElement(entityName, result, dependencies)
+
+	return  entityName, nil
 }
 
 func (t *TypeScriptify) AddImport(i string) {
