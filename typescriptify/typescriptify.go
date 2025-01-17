@@ -99,8 +99,8 @@ type TypeScriptify struct {
 	enums       map[reflect.Type][]enumElement
 	kinds       map[reflect.Kind]string
 
-	orderedElementNames []string
-	elementsMap map[string]string
+	OrderedElementNames []string
+	elementsMap         map[string]string
 	elementsDependenciesMap map[string][]string
 
 	fieldTypeOptions map[reflect.Type]TypeOptions
@@ -351,7 +351,7 @@ func (t *TypeScriptify)AddConvertedElement(name, element string, dependencies []
 		return fmt.Errorf("Duplicate enum type: %s", name)
 	}
 	t.elementsMap[name] = "\n" + strings.Trim(element, " "+t.Indent+"\r\n")
-	t.orderedElementNames = append(t.orderedElementNames, name)
+	t.OrderedElementNames = append(t.OrderedElementNames, name)
 	t.elementsDependenciesMap[name] = dependencies
 	return nil
 }
@@ -365,7 +365,7 @@ func (t *TypeScriptify) Convert(customCode map[string]string) ( error) {
 	depth := 0
 
 	t.elementsMap = map[string]string{}
-	t.orderedElementNames = []string{}
+	t.OrderedElementNames = []string{}
 	t.elementsDependenciesMap = map[string][]string{}
 
 	if len(t.customImports) > 0 {
@@ -496,7 +496,7 @@ func (t TypeScriptify) ConvertToFile(fileName string) error {
 	}
 
 	var converted string
-	for _, name := range t.orderedElementNames{
+	for _, name := range t.OrderedElementNames{
 		converted = converted + t.elementsMap[name] //+ "\n"
 	}
 
@@ -515,7 +515,7 @@ func (t TypeScriptify) ConvertToFile(fileName string) error {
 	return nil
 }
 
-func (t TypeScriptify) ConvertStructsToFiles(pathName string) error {
+func (t *TypeScriptify) ConvertStructsToFiles(pathName string) error {
 	if len(t.BackupDir) > 0 {
 		return fmt.Errorf("BackDir not supported when converting to individual files")
 	}
@@ -527,7 +527,7 @@ func (t TypeScriptify) ConvertStructsToFiles(pathName string) error {
 		return err
 	}
 
-	for _, name := range t.orderedElementNames{
+	for _, name := range t.OrderedElementNames{
 		converted := t.elementsMap[name] //+ "\n"
 
 		f, err := os.Create(fmt.Sprintf("%s/%s.ts", pathName, name))
@@ -542,7 +542,7 @@ func (t TypeScriptify) ConvertStructsToFiles(pathName string) error {
 
 		if dependencies, found := t.elementsDependenciesMap[name]; found{
 			for _, dependency := range dependencies{
-				f.WriteString(fmt.Sprintf("import { %s } from \"./%s\"\n", dependency, dependency))
+				f.WriteString(fmt.Sprintf("import type { %s } from \"./%s\";\n", dependency, dependency))
 			}
 
 			f.WriteString("\n")
@@ -555,6 +555,7 @@ func (t TypeScriptify) ConvertStructsToFiles(pathName string) error {
 			return err
 		}
 	}
+
 
 	return nil
 
